@@ -371,11 +371,11 @@ end
 @testitem "rename: multiple columns" setup=[FruitData] begin
     using Query, DataFrames
 
-    # Known issue: multiple renames in a single @rename may not all apply correctly.
-    @test_broken begin
-        result = FruitData.df |> @duckdb() |> @rename(:fruit => :food, :price => :cost) |> DataFrame
-        "food" in names(result) && "cost" in names(result) && "fruit" ∉ names(result) && "price" ∉ names(result)
-    end
+    result = FruitData.df |> @duckdb() |> @rename(:fruit => :food, :price => :cost) |> DataFrame
+    @test "food" in names(result)
+    @test "cost" in names(result)
+    @test "fruit" ∉ names(result)
+    @test "price" ∉ names(result)
 end
 
 # ============================================================
@@ -385,21 +385,18 @@ end
 @testitem "mutate: computed column" setup=[FruitData] begin
     using Query, DataFrames
 
-    # Known issue: @mutate generates Base.merge() calls that aren't yet handled.
-    @test_broken begin
-        result = FruitData.df |> @duckdb() |> @mutate(total = _.amount * _.price) |> DataFrame
-        "total" in names(result) && nrow(result) == 3 && result.total[1] ≈ 2 * 1.2
-    end
+    result = FruitData.df |> @duckdb() |> @mutate(total = _.amount * _.price) |> DataFrame
+    @test "total" in names(result)
+    @test nrow(result) == 3
+    @test result.total[1] ≈ 2 * 1.2
 end
 
 @testitem "mutate: modify existing column" setup=[FruitData] begin
     using Query, DataFrames
 
-    # Known issue: @mutate generates Base.merge() calls that aren't yet handled.
-    @test_broken begin
-        result = FruitData.df |> @duckdb() |> @mutate(price = 2 * _.price + _.amount) |> DataFrame
-        result.price[1] ≈ 2 * 1.2 + 2 && result.price[2] ≈ 2 * 2.0 + 6
-    end
+    result = FruitData.df |> @duckdb() |> @mutate(price = 2 * _.price + _.amount) |> DataFrame
+    @test result.price[1] ≈ 2 * 1.2 + 2
+    @test result.price[2] ≈ 2 * 2.0 + 6
 end
 
 # ============================================================
@@ -526,12 +523,10 @@ end
 @testitem "groupby: count per group" setup=[GroupData] begin
     using Query, DataFrames
 
-    # Known issue: length() translates to LENGTH() which is a string function in DuckDB.
-    # Should translate to COUNT() for aggregation context.
-    @test_broken begin
-        result = GroupData.df |> @duckdb() |> @groupby(_.children) |> @map({Key=_.children, Count=length(_.children)}) |> @orderby(_.Key) |> DataFrame
-        nrow(result) == 2 && result.Key == [2, 3] && result.Count == [2, 1]
-    end
+    result = GroupData.df |> @duckdb() |> @groupby(_.children) |> @map({Key=_.children, Count=length(_.children)}) |> @orderby(_.Key) |> DataFrame
+    @test nrow(result) == 2
+    @test result.Key == [2, 3]
+    @test result.Count == [2, 1]
 end
 
 @testitem "groupby: sum per group" begin
@@ -589,12 +584,10 @@ end
 @testitem "groupby + map + filter (HAVING)" begin
     using Query, DataFrames
 
-    # Known issue: filter after groupby+map generates WHERE instead of HAVING or wrapping in subquery.
-    @test_broken begin
-        df = DataFrame(a=[1, 1, 2, 3], b=[4, 5, 6, 8])
-        result = df |> @duckdb() |> @groupby(_.a) |> @map({a=_.a, avg_b=sum(_.b)}) |> @filter(_.avg_b > 5) |> @orderby_descending(_.avg_b) |> DataFrame
-        nrow(result) == 2 && result.a == [1, 3]
-    end
+    df = DataFrame(a=[1, 1, 2, 3], b=[4, 5, 6, 8])
+    result = df |> @duckdb() |> @groupby(_.a) |> @map({a=_.a, avg_b=sum(_.b)}) |> @filter(_.avg_b > 5) |> @orderby_descending(_.avg_b) |> DataFrame
+    @test nrow(result) == 2
+    @test result.a == [1, 3]
 end
 
 # ============================================================
@@ -604,12 +597,10 @@ end
 @testitem "join: inner join two dataframes" setup=[JoinData] begin
     using Query, DataFrames
 
-    # Known issue: JOIN produces ambiguous column references when both tables are registered
-    # as "source_tbl" and columns need qualified names.
-    @test_broken begin
-        result = JoinData.df1 |> @duckdb() |> @join(JoinData.df2 |> @duckdb(), _.a, _.c, {_.a, _.b, __.c, __.d}) |> DataFrame
-        nrow(result) == 2 && Set(result.d) == Set(["John", "Sally"]) && all(result.a .== 2)
-    end
+    result = JoinData.df1 |> @duckdb() |> @join(JoinData.df2 |> @duckdb(), _.a, _.c, {_.a, _.b, __.c, __.d}) |> DataFrame
+    @test nrow(result) == 2
+    @test Set(result.d) == Set(["John", "Sally"])
+    @test all(result.a .== 2)
 end
 
 # ============================================================
