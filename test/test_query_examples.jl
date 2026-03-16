@@ -586,8 +586,8 @@ end
 
     df = DataFrame(a=[1, 1, 2, 3], b=[4, 5, 6, 8])
     result = df |> @duckdb() |> @groupby(_.a) |> @map({a=_.a, avg_b=sum(_.b)}) |> @filter(_.avg_b > 5) |> @orderby_descending(_.avg_b) |> DataFrame
-    @test nrow(result) == 2
-    @test result.a == [1, 3]
+    @test nrow(result) == 3
+    @test result.a == [1, 3, 2]
 end
 
 # ============================================================

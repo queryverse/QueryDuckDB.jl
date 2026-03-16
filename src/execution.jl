@@ -23,7 +23,18 @@ function duckdb_getiterator(query_tree::QueryableBackend.Queryable)
 
     # Register table data if source is :table
     if source.source_type == :table
-        register_source_data(con, source.original_source)
+        register_source_data(con, source.original_source, "source_tbl")
+    end
+
+    # Register inner join table if needed
+    nodes = QueryableBackend.walk_tree(query_tree)
+    for node in nodes
+        if node isa QueryableBackend.QueryableJoin
+            inner_source = node.inner
+            if inner_source isa DuckDBQueryableSource && inner_source.source_type == :table
+                register_source_data(con, inner_source.original_source, "source_tbl_2")
+            end
+        end
     end
 
     # Execute query
@@ -47,16 +58,16 @@ end
 Register the source data with DuckDB using the best available method.
 Prefers columnar TableTraits interfaces, falls back to row iteration.
 """
-function register_source_data(con, source)
+function register_source_data(con, source, table_name::String="source_tbl")
     if TableTraits.supports_get_columns_copy_using_missing(source)
         # Fast columnar path
         columns = TableTraits.get_columns_copy_using_missing(source)
-        DuckDB.register_table(con, columns, "source_tbl")
+        DuckDB.register_table(con, columns, table_name)
     elseif TableTraits.supports_get_columns_copy(source)
         columns = TableTraits.get_columns_copy(source)
-        DuckDB.register_table(con, columns, "source_tbl")
+        DuckDB.register_table(con, columns, table_name)
     else
         # Fallback: use Tables.jl columntable (DuckDB.register_table calls this internally)
-        DuckDB.register_table(con, source, "source_tbl")
+        DuckDB.register_table(con, source, table_name)
     end
 end
