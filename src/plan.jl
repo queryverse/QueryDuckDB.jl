@@ -36,17 +36,10 @@ function create_duckdb_plan(query_tree::QueryableBackend.Queryable, explain::Boo
 
     explain_output = nothing
     if explain
-        source = QueryableBackend.get_source(query_tree)
-        if !(source isa DuckDBQueryableSource)
-            error("Expected DuckDBQueryableSource at root of query tree")
-        end
-
         db = DuckDB.DB()
         con = DBInterface.connect(db)
 
-        if source.source_type == :table
-            register_source_data(con, source.original_source)
-        end
+        register_query_sources(con, query_tree)
 
         explain_result = DBInterface.execute(con, "EXPLAIN " * sql_query.sql, sql_query.params)
         rows = collect(Tables.rows(explain_result))
@@ -119,7 +112,9 @@ macro duckdbplan(args...)
     for arg in args
         if arg isa Expr && arg.head == :(=) && arg.args[1] == :explain
             explain = arg.args[2]
+        else
+            error("Unknown argument to @duckdbplan: $arg — only explain=<Bool> is supported")
         end
     end
-    return :(i -> QueryDuckDB.create_duckdb_plan(i, $explain))
+    return :(i -> QueryDuckDB.create_duckdb_plan(i, $(esc(explain))))
 end

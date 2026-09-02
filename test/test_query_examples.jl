@@ -590,6 +590,91 @@ end
     @test result.a == [1, 3, 2]
 end
 
+@testitem "groupby: key(_) refers to the group key" begin
+    using Query, DataFrames
+
+    df = DataFrame(category=["A", "B", "A", "B", "A"], value=[10, 20, 30, 40, 50])
+    result = df |> @duckdb() |> @groupby(_.category) |> @map({k=key(_), total=sum(_.value)}) |> @orderby(_.k) |> DataFrame
+    @test result.k == ["A", "B"]
+    @test result.total == [90, 60]
+end
+
+@testitem "groupby: key(_) in filter (HAVING)" begin
+    using Query, DataFrames
+
+    df = DataFrame(category=["A", "B", "A"], value=[10, 20, 30])
+    result = df |> @duckdb() |> @groupby(_.category) |> @map({k=key(_), total=sum(_.value)}) |> @filter(_.total > 25) |> DataFrame
+    @test result.k == ["A"]
+end
+
+@testitem "groupby: three-argument form with projection" begin
+    using Query, DataFrames
+
+    df = DataFrame(category=["A", "B", "A"], value=[10, 20, 30], junk=["a", "b", "c"])
+    q = df |> @duckdb() |> @groupby(_.category, {_.value}) |> @map({cat=key(_), total=sum(_.value)}) |> @orderby(_.cat)
+
+    plan = q |> @duckdbplan()
+    @test occursin(r"FROM \(SELECT \"value\"[^)]*\"category\" FROM", plan.sql)
+    @test occursin("GROUP BY \"category\"", plan.sql)
+
+    result = q |> DataFrame
+    @test result.cat == ["A", "B"]
+    @test result.total == [40, 20]
+end
+
+@testitem "groupby: three-argument form with computed element" begin
+    using Query, DataFrames
+
+    df = DataFrame(category=["A", "B", "A"], value=[10, 20, 30])
+    result = df |> @duckdb() |> @groupby(_.category, {v2 = _.value * 2}) |> @map({cat=key(_), total=sum(_.v2)}) |> @orderby(_.cat) |> DataFrame
+    @test result.cat == ["A", "B"]
+    @test result.total == [80, 40]
+end
+
+@testitem "groupby: three-argument form with computed key throws" begin
+    using Query, DataFrames
+
+    df = DataFrame(category=["A", "B", "A"], value=[10, 20, 30])
+    @test_throws QueryDuckDB.TranslationError df |> @duckdb() |> @groupby(_.value > 15, {_.value}) |> @map({total=sum(_.value)}) |> DataFrame
+end
+
+@testitem "groupby: terminal groupby throws a friendly error" begin
+    using Query, DataFrames
+
+    df = DataFrame(category=["A", "B", "A"], value=[10, 20, 30])
+    @test_throws QueryDuckDB.TranslationError df |> @duckdb() |> @groupby(_.category) |> DataFrame
+end
+
+@testitem "groupby + map + map + filter uses WHERE on outer query" begin
+    using Query, DataFrames
+
+    df = DataFrame(a=[1, 1, 2, 3], b=[4, 5, 6, 8])
+    q = df |> @duckdb() |> @groupby(_.a) |> @map({a=_.a, total=sum(_.b)}) |> @map({a=_.a, t2=_.total}) |> @filter(_.t2 > 5)
+
+    plan = q |> @duckdbplan()
+    outer_sql = split(plan.sql, "subq")[end]
+    @test occursin("WHERE", outer_sql)
+    @test !occursin("HAVING", outer_sql)
+
+    result = q |> DataFrame
+    @test nrow(result) == 3
+    @test Set(result.a) == Set([1, 2, 3])
+end
+
+@testitem "groupby + map + map: length is LENGTH on outer query" begin
+    using Query, DataFrames
+
+    df = DataFrame(a=[1, 2, 3], s=["xx", "y", "zzz"])
+    q = df |> @duckdb() |> @groupby(_.a) |> @map({a=_.a, m=maximum(_.s)}) |> @map({a=_.a, n=length(_.m)}) |> @orderby(_.a)
+
+    plan = q |> @duckdbplan()
+    @test occursin("LENGTH(", plan.sql)
+    @test !occursin("COUNT(", plan.sql)
+
+    result = q |> DataFrame
+    @test result.n == [2, 1, 3]
+end
+
 # ============================================================
 # Join tests (from Query.jl Example 08 / join docs)
 # ============================================================

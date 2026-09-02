@@ -36,13 +36,17 @@ function build_sql(nodes::Vector{QueryableBackend.Queryable}, params::Vector{Any
     limit_clause = nothing
     offset_clause = nothing
     distinct = false
+    distinct_on = nothing
     has_groupby = false
+    group_key_sql = nothing
 
     for i in 2:length(nodes)
         node = nodes[i]
 
         if node isa QueryableBackend.QueryableFilter
-            filter_sql = translate_filter_expr(node.filter_expr, params)
+            filter_sql = @with GROUP_KEY_SQL => group_key_sql begin
+                translate_filter_expr(node.filter_expr, params)
+            end
             if has_groupby
                 push!(having_clauses, filter_sql)
             else
@@ -52,7 +56,7 @@ function build_sql(nodes::Vector{QueryableBackend.Queryable}, params::Vector{Any
         elseif node isa QueryableBackend.QueryableMap
             if select_clause != "*"
                 # We already have a SELECT — need a subquery
-                inner_sql = assemble_sql(select_clause, from_clause, where_clauses, groupby_clauses, having_clauses, orderby_clauses, limit_clause, offset_clause, distinct)
+                inner_sql = assemble_sql(select_clause, from_clause, where_clauses, groupby_clauses, having_clauses, orderby_clauses, limit_clause, offset_clause, distinct, distinct_on)
                 from_clause = "($inner_sql) AS subq$(i)"
                 select_clause = "*"
                 where_clauses = String[]
@@ -62,8 +66,13 @@ function build_sql(nodes::Vector{QueryableBackend.Queryable}, params::Vector{Any
                 limit_clause = nothing
                 offset_clause = nothing
                 distinct = false
+                distinct_on = nothing
+                has_groupby = false
+                group_key_sql = nothing
             end
-            select_clause = translate_map_expr(node.f_expr, params; in_aggregation=has_groupby)
+            select_clause = @with GROUP_KEY_SQL => group_key_sql begin
+                translate_map_expr(node.f_expr, params; in_aggregation=has_groupby)
+            end
 
         elseif node isa QueryableBackend.QueryableOrderBy
             col = translate_orderby_expr(node.keySelector_expr, params)
@@ -82,17 +91,65 @@ function build_sql(nodes::Vector{QueryableBackend.Queryable}, params::Vector{Any
             offset_clause = node.n
 
         elseif node isa QueryableBackend.QueryableUnique
-            distinct = true
+            key_sql = translate_unique_expr(node.f_expr, params)
+            if key_sql === nothing
+                distinct = true
+            else
+                distinct_on = key_sql
+            end
 
         elseif node isa QueryableBackend.QueryableGroupBy
             col = translate_groupby_expr(node.elementSelector_expr, params)
             push!(groupby_clauses, col)
             has_groupby = true
+            group_key_sql = col
 
         elseif node isa QueryableBackend.QueryableGroupByFull
-            col = translate_groupby_expr(node.elementSelector_expr, params)
-            push!(groupby_clauses, col)
-            has_groupby = true
+            if is_identity_lambda(node.resultSelector_expr)
+                col = translate_groupby_expr(node.elementSelector_expr, params)
+                push!(groupby_clauses, col)
+                has_groupby = true
+                group_key_sql = col
+            else
+                # Three-argument @groupby: the result selector projects each
+                # element of a group. Apply the projection (plus the key
+                # column) in a subquery, then GROUP BY the key on top of it.
+                key_sym, key_body = extract_lambda_parts(node.elementSelector_expr)
+                key_body = unwrap_block(key_body)
+                if !is_property_access(key_body, key_sym)
+                    throw(TranslationError("Three-argument @groupby with a computed key selector is not supported; apply the transformation with @map before @groupby", :groupby))
+                end
+                key_col = quote_identifier(extract_column_name(key_body))
+                if select_clause != "*"
+                    inner_sql = assemble_sql(select_clause, from_clause, where_clauses, groupby_clauses, having_clauses, orderby_clauses, limit_clause, offset_clause, distinct, distinct_on)
+                    from_clause = "($inner_sql) AS subq$(i)"
+                    select_clause = "*"
+                    where_clauses = String[]
+                    having_clauses = String[]
+                    orderby_clauses = String[]
+                    groupby_clauses = String[]
+                    limit_clause = nothing
+                    offset_clause = nothing
+                    distinct = false
+                    distinct_on = nothing
+                end
+                proj = translate_map_expr(node.resultSelector_expr, params)
+                inner_select = startswith(proj, "*") || occursin(key_col, proj) ? proj : "$proj, $key_col"
+                inner_sql = assemble_sql(inner_select, from_clause, where_clauses, groupby_clauses, having_clauses, orderby_clauses, limit_clause, offset_clause, distinct, distinct_on)
+                from_clause = "($inner_sql) AS grpsubq$(i)"
+                select_clause = "*"
+                where_clauses = String[]
+                having_clauses = String[]
+                orderby_clauses = String[]
+                groupby_clauses = String[]
+                limit_clause = nothing
+                offset_clause = nothing
+                distinct = false
+                distinct_on = nothing
+                push!(groupby_clauses, key_col)
+                has_groupby = true
+                group_key_sql = key_col
+            end
 
         elseif node isa QueryableBackend.QueryableJoin
             # Build JOIN clause
@@ -130,7 +187,11 @@ function build_sql(nodes::Vector{QueryableBackend.Queryable}, params::Vector{Any
         end
     end
 
-    sql = assemble_sql(select_clause, from_clause, where_clauses, groupby_clauses, having_clauses, orderby_clauses, limit_clause, offset_clause, distinct)
+    if has_groupby && select_clause == "*"
+        throw(TranslationError("@groupby must be followed by @map with aggregations when using the DuckDB backend", :groupby))
+    end
+
+    sql = assemble_sql(select_clause, from_clause, where_clauses, groupby_clauses, having_clauses, orderby_clauses, limit_clause, offset_clause, distinct, distinct_on)
     return SQLQuery(sql, params)
 end
 
@@ -179,10 +240,11 @@ function source_to_from(source::DuckDBQueryableSource, table_name::String="sourc
     end
 end
 
-function assemble_sql(select_clause, from_clause, where_clauses, groupby_clauses, having_clauses, orderby_clauses, limit_clause, offset_clause, distinct)
+function assemble_sql(select_clause, from_clause, where_clauses, groupby_clauses, having_clauses, orderby_clauses, limit_clause, offset_clause, distinct, distinct_on)
     parts = String[]
 
-    select_kw = distinct ? "SELECT DISTINCT" : "SELECT"
+    select_kw = distinct_on !== nothing ? "SELECT DISTINCT ON ($distinct_on)" :
+                distinct ? "SELECT DISTINCT" : "SELECT"
     push!(parts, "$select_kw $select_clause")
     push!(parts, "FROM $from_clause")
 

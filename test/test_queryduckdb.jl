@@ -103,8 +103,34 @@ end
 @testitem "unique" setup=[TestData] begin
     using Query, DataFrames
 
+    df = DataFrame(name=["Alice", "Alice", "Bob"], age=[30, 30, 25])
+    result = df |> @duckdb() |> @unique() |> DataFrame
+    @test nrow(result) == 2
+
+    plan = df |> @duckdb() |> @unique() |> @duckdbplan()
+    @test occursin("SELECT DISTINCT ", plan.sql)
+    @test !occursin("DISTINCT ON", plan.sql)
+end
+
+@testitem "unique with key" setup=[TestData] begin
+    using Query, DataFrames
+
     result = TestData.df |> @duckdb() |> @unique(_.city) |> DataFrame
-    @test nrow(result) == 4  # DISTINCT applies to all columns, not just city
+    @test nrow(result) == 2
+    @test Set(result.city) == Set(["NYC", "LA"])
+
+    plan = TestData.df |> @duckdb() |> @unique(_.city) |> @duckdbplan()
+    @test occursin("SELECT DISTINCT ON (\"city\") *", plan.sql)
+end
+
+@testitem "unique with multiple keys" setup=[TestData] begin
+    using Query, DataFrames
+
+    result = TestData.df |> @duckdb() |> @unique({_.name, _.city}) |> DataFrame
+    @test nrow(result) == 4
+
+    plan = TestData.df |> @duckdb() |> @unique({_.name, _.city}) |> @duckdbplan()
+    @test occursin("DISTINCT ON (\"name\", \"city\")", plan.sql)
 end
 
 @testitem "columnar materialization" setup=[TestData] begin
@@ -191,4 +217,26 @@ end
 
     output = sprint(show, MIME("text/plain"), plan)
     @test occursin("Physical Plan:", output)
+end
+
+@testitem "duckdbplan explain with join" setup=[TestData] begin
+    using Query, DataFrames
+
+    df1 = DataFrame(a=[1, 2, 3], b=[4, 5, 6])
+    df2 = DataFrame(c=[2, 3, 4], d=["John", "Sally", "Kirk"])
+    plan = df1 |> @duckdb() |> @join(df2 |> @duckdb(), _.a, _.c, {_.a, _.b, __.d}) |> @duckdbplan(explain=true)
+    @test plan.explain_output !== nothing
+    @test !isempty(plan.explain_output)
+end
+
+@testitem "duckdbplan explain with non-literal argument" setup=[TestData] begin
+    using Query, DataFrames
+
+    e = true
+    plan = TestData.df |> @duckdb() |> @filter(_.age > 28) |> @duckdbplan(explain=e)
+    @test plan.explain_output !== nothing
+end
+
+@testitem "duckdbplan rejects unknown arguments" begin
+    @test_throws LoadError @macroexpand @duckdbplan(explan=true)
 end

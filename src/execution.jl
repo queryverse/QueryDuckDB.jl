@@ -9,11 +9,6 @@ The getiterator callback for DuckDBQueryableSource.
 Walks the query tree, generates SQL, executes via DuckDB, and returns a DuckDBQueryResult.
 """
 function duckdb_getiterator(query_tree::QueryableBackend.Queryable)
-    source = QueryableBackend.get_source(query_tree)
-    if !(source isa DuckDBQueryableSource)
-        error("Expected DuckDBQueryableSource at root of query tree")
-    end
-
     # Generate SQL
     sql_query = generate_sql(query_tree)
 
@@ -21,21 +16,7 @@ function duckdb_getiterator(query_tree::QueryableBackend.Queryable)
     db = DuckDB.DB()
     con = DBInterface.connect(db)
 
-    # Register table data if source is :table
-    if source.source_type == :table
-        register_source_data(con, source.original_source, "source_tbl")
-    end
-
-    # Register inner join table if needed
-    nodes = QueryableBackend.walk_tree(query_tree)
-    for node in nodes
-        if node isa QueryableBackend.QueryableJoin
-            inner_source = node.inner
-            if inner_source isa DuckDBQueryableSource && inner_source.source_type == :table
-                register_source_data(con, inner_source.original_source, "source_tbl_2")
-            end
-        end
-    end
+    register_query_sources(con, query_tree)
 
     # Execute query
     result = DBInterface.execute(con, sql_query.sql, sql_query.params)
@@ -50,6 +31,32 @@ function duckdb_getiterator(query_tree::QueryableBackend.Queryable)
     DBInterface.close!(db)
 
     return DuckDBQueryResult(columns_nt)
+end
+
+"""
+    register_query_sources(con, query_tree)
+
+Register every :table source in the query tree with the DuckDB connection:
+the root source as `source_tbl`, and each join's inner source as `source_tbl_2`.
+"""
+function register_query_sources(con, query_tree::QueryableBackend.Queryable)
+    source = QueryableBackend.get_source(query_tree)
+    if !(source isa DuckDBQueryableSource)
+        error("Expected DuckDBQueryableSource at root of query tree")
+    end
+
+    if source.source_type == :table
+        register_source_data(con, source.original_source, "source_tbl")
+    end
+
+    for node in QueryableBackend.walk_tree(query_tree)
+        if node isa QueryableBackend.QueryableJoin
+            inner_source = node.inner
+            if inner_source isa DuckDBQueryableSource && inner_source.source_type == :table
+                register_source_data(con, inner_source.original_source, "source_tbl_2")
+            end
+        end
+    end
 end
 
 """

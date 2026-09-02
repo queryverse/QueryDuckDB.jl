@@ -12,6 +12,11 @@ end
 
 Base.showerror(io::IO, e::TranslationError) = print(io, "TranslationError: ", e.msg, "\n  Expression: ", e.expr)
 
+# SQL fragment of the current GROUP BY key, so `key(_)` can be translated in
+# expressions downstream of a @groupby. Set by build_sql around the map/filter
+# translations that run in a grouped context.
+const GROUP_KEY_SQL = ScopedValue{Union{Nothing,String}}(nothing)
+
 # Map Julia operators to SQL operators
 const BINARY_OPS = Dict{Symbol,String}(
     :(==) => "=",
@@ -220,6 +225,15 @@ function translate_call(expr::Expr, params::Vector{Any}, row_sym::Symbol; in_agg
     # count
     if func == :count && length(args) == 0
         return "COUNT(*)"
+    end
+
+    # key(_) — the group key, valid downstream of @groupby
+    if func == :key && length(args) == 1 && (args[1] == row_sym || args[1] == :_)
+        key_sql = GROUP_KEY_SQL[]
+        if key_sql === nothing
+            throw(TranslationError("key(_) is only supported downstream of @groupby", expr))
+        end
+        return key_sql
     end
 
     # length: context-dependent — COUNT in aggregation, LENGTH otherwise
@@ -730,6 +744,59 @@ Translate a groupby expression (lambda) into a SQL GROUP BY column fragment.
 function translate_groupby_expr(expr::Expr, params::Vector{Any})
     row_sym, body = extract_lambda_parts(expr)
     body = unwrap_block(body)
+    if is_property_access(body, row_sym)
+        return quote_identifier(extract_column_name(body))
+    end
+    return translate_expr(body, params, row_sym)
+end
+
+"""
+    is_identity_lambda(expr::Expr) -> Bool
+
+Check whether a lambda is the identity function (e.g. `q -> q`), as produced
+by the no-argument form of `@unique()` and the implicit result selector of
+two-argument `@groupby`.
+"""
+function is_identity_lambda(expr::Expr)
+    row_sym, body = extract_lambda_parts(expr)
+    body = unwrap_block(body)
+    return body == row_sym || body == :_
+end
+
+"""
+    translate_unique_expr(expr::Expr, params::Vector{Any}) -> Union{Nothing,String}
+
+Translate a `@unique` key selector (lambda) into a SQL DISTINCT ON column list.
+Returns `nothing` for the identity lambda (bare `@unique()`), which maps to
+plain SELECT DISTINCT instead.
+"""
+function translate_unique_expr(expr::Expr, params::Vector{Any})
+    is_identity_lambda(expr) && return nothing
+    row_sym, body = extract_lambda_parts(expr)
+    body = unwrap_block(body)
+    if body isa Expr && (body.head == :tuple || body.head == :parameters)
+        args_list = Any[]
+        for arg in body.args
+            if arg isa Expr && arg.head == :parameters
+                append!(args_list, arg.args)
+            else
+                push!(args_list, arg)
+            end
+        end
+        keys = String[]
+        for arg in args_list
+            arg isa LineNumberNode && continue
+            if arg isa Expr && (arg.head == :kw || arg.head == :(=))
+                arg = arg.args[2]
+            end
+            if is_property_access(arg, row_sym)
+                push!(keys, quote_identifier(extract_column_name(arg)))
+            else
+                push!(keys, translate_expr(arg, params, row_sym))
+            end
+        end
+        return join(keys, ", ")
+    end
     if is_property_access(body, row_sym)
         return quote_identifier(extract_column_name(body))
     end
