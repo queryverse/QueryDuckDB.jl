@@ -3,7 +3,6 @@ module QueryDuckDB
 using Base.ScopedValues: ScopedValue, @with
 
 import QueryableBackend
-import QueryOperators
 import IteratorInterfaceExtensions
 import TableTraits
 import DuckDB
