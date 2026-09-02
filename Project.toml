@@ -29,6 +29,7 @@ QueryDuckDBParquetFilesExt = "ParquetFiles"
 ExcelFiles = {url = "https://github.com/queryverse/ExcelFiles.jl", rev = "main"}
 
 [compat]
+CSVFiles = "1.0.2"
 DBInterface = "2"
 DuckDB = "1"
 ExcelFiles = "1"
