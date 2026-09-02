@@ -165,6 +165,13 @@ function source_to_from(source::DuckDBQueryableSource, table_name::String="sourc
     elseif source.source_type == :feather
         path = escape_sql_string(source.source_path)
         return "read_arrow('$path')"
+    elseif source.source_type == :excel
+        path = escape_sql_string(source.source_path)
+        parts = ["'$path'"]
+        for (k, v) in source.source_options
+            push!(parts, "$k = $(format_sql_option(v))")
+        end
+        return "read_xlsx(" * join(parts, ", ") * ")"
     elseif source.source_type == :table
         return quote_identifier(table_name)
     else
