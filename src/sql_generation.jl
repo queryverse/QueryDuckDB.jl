@@ -75,9 +75,20 @@ function build_sql(nodes::Vector{QueryableBackend.Queryable}, params::Vector{Any
             end
 
         elseif node isa QueryableBackend.QueryableOrderBy
-            col = translate_orderby_expr(node.keySelector_expr, params)
             direction = node.descending ? "DESC" : "ASC"
-            push!(orderby_clauses, "$col $direction")
+            if is_identity_lambda(node.keySelector_expr)
+                # @order()/@order_descending() sort by whole rows, which DuckDB
+                # spells ORDER BY ALL.
+                push!(orderby_clauses, "ALL $direction")
+            else
+                col = translate_orderby_expr(node.keySelector_expr, params)
+                push!(orderby_clauses, "$col $direction")
+            end
+
+        elseif node isa QueryableBackend.QueryableShuffle
+            node.rng === nothing ||
+                throw(TranslationError("`@shuffle` with an explicit rng cannot be pushed down to DuckDB, which has its own random number generator. Drop the `rng` argument, or materialize the query first.", :shuffle))
+            push!(orderby_clauses, "random()")
 
         elseif node isa QueryableBackend.QueryableThenBy
             col = translate_orderby_expr(node.keySelector_expr, params)
@@ -151,39 +162,99 @@ function build_sql(nodes::Vector{QueryableBackend.Queryable}, params::Vector{Any
                 group_key_sql = key_col
             end
 
-        elseif node isa QueryableBackend.QueryableJoin
-            # Build JOIN clause
-            inner_source = node.inner
-            inner_from = if inner_source isa DuckDBQueryableSource
-                source_to_from(inner_source, "source_tbl_2")
-            else
-                throw(TranslationError("JOIN inner source must be a DuckDBQueryableSource", :join))
-            end
+        elseif node isa QueryableBackend.QueryableJoin ||
+               node isa QueryableBackend.QueryableLeftJoin ||
+               node isa QueryableBackend.QueryableRightJoin ||
+               node isa QueryableBackend.QueryableFullJoin
+            inner_from = inner_source_to_from(node, i, join_kind(node))
             outer_alias = "t1"
             inner_alias = "t2"
             # Extract key selectors with table aliases
-            outer_key_sym, outer_key_body = extract_lambda_parts(node.outerKeySelector_expr)
-            outer_key_body = unwrap_block(outer_key_body)
-            outer_key_col = if is_property_access(outer_key_body, outer_key_sym)
-                quote_identifier(outer_alias) * "." * quote_identifier(extract_column_name(outer_key_body))
-            else
-                translate_expr(outer_key_body, params, outer_key_sym)
-            end
-            inner_key_sym, inner_key_body = extract_lambda_parts(node.innerKeySelector_expr)
-            inner_key_body = unwrap_block(inner_key_body)
-            inner_key_col = if is_property_access(inner_key_body, inner_key_sym)
-                quote_identifier(inner_alias) * "." * quote_identifier(extract_column_name(inner_key_body))
-            else
-                translate_expr(inner_key_body, params, inner_key_sym)
-            end
-            from_clause = "$from_clause AS $(quote_identifier(outer_alias)) INNER JOIN $inner_from AS $(quote_identifier(inner_alias)) ON $outer_key_col = $inner_key_col"
+            outer_key_col = join_key_sql(node.outerKeySelector_expr, outer_alias, params)
+            inner_key_col = join_key_sql(node.innerKeySelector_expr, inner_alias, params)
+            from_clause = "$from_clause AS $(quote_identifier(outer_alias)) $(join_kind(node)) $inner_from AS $(quote_identifier(inner_alias)) ON $outer_key_col = $inner_key_col"
             # Translate result selector with join context
-            if select_clause == "*" && hasproperty(node, :resultSelector_expr)
+            if select_clause == "*"
                 select_clause = translate_join_map_expr(node.resultSelector_expr, params, outer_alias, inner_alias)
             end
 
+        elseif node isa QueryableBackend.QueryableConcat ||
+               node isa QueryableBackend.QueryableUnion ||
+               node isa QueryableBackend.QueryableExcept ||
+               node isa QueryableBackend.QueryableIntersect
+            # Set operations combine the query built so far with a second one,
+            # so everything accumulated is sealed into the left-hand side and
+            # the result becomes the new FROM.
+            left_sql = assemble_sql(select_clause, from_clause, where_clauses, groupby_clauses, having_clauses, orderby_clauses, limit_clause, offset_clause, distinct, distinct_on)
+            right_sql = inner_query_sql(node, i, params)
+
+            from_clause = setop_from(node, left_sql, right_sql, i)
+
+            select_clause = "*"
+            where_clauses = String[]
+            having_clauses = String[]
+            orderby_clauses = String[]
+            groupby_clauses = String[]
+            limit_clause = nothing
+            offset_clause = nothing
+            distinct = false
+            distinct_on = nothing
+            has_groupby = false
+            group_key_sql = nothing
+
+        elseif node isa QueryableBackend.QueryableCountBy
+            col = translate_groupby_expr(node.f_expr, params)
+            if select_clause != "*" || !isempty(groupby_clauses)
+                inner_sql = assemble_sql(select_clause, from_clause, where_clauses, groupby_clauses, having_clauses, orderby_clauses, limit_clause, offset_clause, distinct, distinct_on)
+                from_clause = "($inner_sql) AS countby_subq$(i)"
+                where_clauses = String[]
+                having_clauses = String[]
+                orderby_clauses = String[]
+                limit_clause = nothing
+                offset_clause = nothing
+                distinct = false
+                distinct_on = nothing
+            end
+            # The key column is named `key`, matching how the in-memory
+            # count_by and summarize name a scalar grouping key.
+            select_clause = "$col AS $(quote_identifier("key")), COUNT(*) AS $(quote_identifier("count"))"
+            groupby_clauses = [col]
+            has_groupby = false
+            group_key_sql = col
+
+        elseif node isa QueryableBackend.QueryableTakeLast ||
+               node isa QueryableBackend.QueryableDropLast
+            inner_sql = assemble_sql(select_clause, from_clause, where_clauses, groupby_clauses, having_clauses, orderby_clauses, limit_clause, offset_clause, distinct, distinct_on)
+            n = node.n
+            comparison = node isa QueryableBackend.QueryableTakeLast ? ">" : "<="
+            # Everything accumulated is now inside inner_sql, so the clause
+            # state has to start over on top of it.
+            where_clauses = String[]
+            if n <= 0
+                # take_last(0) keeps nothing; drop_last(0) keeps everything.
+                from_clause = "($inner_sql) AS lastsubq$(i)"
+                node isa QueryableBackend.QueryableTakeLast && push!(where_clauses, "FALSE")
+            else
+                # Row position is not a SQL concept, so it is materialised with
+                # ROW_NUMBER(). COUNT(*) OVER () supplies the total from the
+                # same single scan, so the subquery is not repeated and its
+                # positional parameters stay in order.
+                from_clause = "(SELECT * FROM ($inner_sql) AS lastinner$(i) " *
+                    "QUALIFY ROW_NUMBER() OVER () $comparison COUNT(*) OVER () - $n) AS lastsubq$(i)"
+            end
+            select_clause = "*"
+            having_clauses = String[]
+            orderby_clauses = String[]
+            groupby_clauses = String[]
+            limit_clause = nothing
+            offset_clause = nothing
+            distinct = false
+            distinct_on = nothing
+            has_groupby = false
+            group_key_sql = nothing
+
         else
-            throw(TranslationError("Unsupported query operation: $(typeof(node))", :unsupported))
+            throw_unsupported(node)
         end
     end
 
@@ -193,6 +264,76 @@ function build_sql(nodes::Vector{QueryableBackend.Queryable}, params::Vector{Any
 
     sql = assemble_sql(select_clause, from_clause, where_clauses, groupby_clauses, having_clauses, orderby_clauses, limit_clause, offset_clause, distinct, distinct_on)
     return SQLQuery(sql, params)
+end
+
+# --- Two-input operators ---
+
+# Each two-input node registers its right-hand source under a name derived from
+# its position in the walked tree, so that several of them in one query cannot
+# collide. execution.jl walks the tree the same way to register them.
+inner_table_name(i::Int) = "source_tbl_$(i)"
+
+join_kind(::QueryableBackend.QueryableJoin) = "INNER JOIN"
+join_kind(::QueryableBackend.QueryableLeftJoin) = "LEFT OUTER JOIN"
+join_kind(::QueryableBackend.QueryableRightJoin) = "RIGHT OUTER JOIN"
+join_kind(::QueryableBackend.QueryableFullJoin) = "FULL OUTER JOIN"
+
+function inner_source_to_from(node, i::Int, label::AbstractString)
+    inner_source = node.inner
+    inner_source isa DuckDBQueryableSource ||
+        throw(TranslationError("The second operand of $label must be a DuckDB source too — add `|> @duckdb()` to it.", :join))
+    return source_to_from(inner_source, inner_table_name(i))
+end
+
+# A join key qualified by its table alias, so that a column present on both
+# sides is unambiguous.
+function join_key_sql(expr::Expr, alias::AbstractString, params::Vector{Any})
+    sym, body = extract_lambda_parts(expr)
+    body = unwrap_block(body)
+    if is_property_access(body, sym)
+        return quote_identifier(alias) * "." * quote_identifier(extract_column_name(body))
+    end
+    return translate_expr(body, params, sym)
+end
+
+function inner_query_sql(node, i::Int, params::Vector{Any})
+    inner_from = inner_source_to_from(node, i, "a set operation")
+    return "SELECT * FROM $inner_from"
+end
+
+# The key of a `_by` set operation has to be a plain column: the key SQL is
+# placed before the left-hand query in the generated text, so a key that
+# contributed positional parameters would put them out of order.
+function setop_key_sql(node, i::Int)
+    sym, body = extract_lambda_parts(node.f_expr)
+    body = unwrap_block(body)
+    is_property_access(body, sym) ||
+        throw(TranslationError("A computed key in a `_by` set operation is not supported by the DuckDB backend; apply the transformation with `@map` first.", :setop))
+    return quote_identifier(extract_column_name(body))
+end
+
+function setop_from(node::QueryableBackend.QueryableConcat, left_sql, right_sql, i::Int)
+    return "(($left_sql) UNION ALL ($right_sql)) AS setop$(i)"
+end
+
+function setop_from(node::QueryableBackend.QueryableUnion, left_sql, right_sql, i::Int)
+    node.f_expr === nothing && return "(($left_sql) UNION ($right_sql)) AS setop$(i)"
+    key = setop_key_sql(node, i)
+    return "(SELECT DISTINCT ON ($key) * FROM (($left_sql) UNION ALL ($right_sql)) AS setopinner$(i)) AS setop$(i)"
+end
+
+function setop_from(node::QueryableBackend.QueryableExcept, left_sql, right_sql, i::Int)
+    node.f_expr === nothing && return "(($left_sql) EXCEPT ($right_sql)) AS setop$(i)"
+    key = setop_key_sql(node, i)
+    return "(SELECT DISTINCT ON ($key) * FROM ($left_sql) AS setopleft$(i) " *
+        "WHERE $key NOT IN (SELECT $key FROM ($right_sql) AS setopright$(i))) AS setop$(i)"
+end
+
+function setop_from(node::QueryableBackend.QueryableIntersect, left_sql, right_sql, i::Int)
+    node.f_expr === nothing && return "(($left_sql) INTERSECT ($right_sql)) AS setop$(i)"
+    key = setop_key_sql(node, i)
+    return "(SELECT DISTINCT ON ($key) * FROM ($left_sql) AS setopleft$(i) " *
+        "WHERE $key IN (SELECT $key FROM ($right_sql) AS setopright$(i))) AS setop$(i)"
 end
 
 function format_sql_option(value)

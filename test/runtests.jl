@@ -1,6 +1,7 @@
 using TestItemRunner
 
 include("test_queryduckdb.jl")
+include("test_new_operators.jl")
 include("test_query_examples.jl")
 include("test_csvfiles.jl")
 include("test_excelfiles.jl")
