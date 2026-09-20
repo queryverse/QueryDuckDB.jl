@@ -36,8 +36,12 @@ end
 """
     register_query_sources(con, query_tree)
 
-Register every :table source in the query tree with the DuckDB connection:
-the root source as `source_tbl`, and each join's inner source as `source_tbl_2`.
+Register every :table source in the query tree with the DuckDB connection: the
+root source as `source_tbl`, and the second input of every two-input node —
+joins, set operations — under the name `inner_table_name` derives from its
+position in the walked tree. sql_generation.jl walks the tree the same way, so
+the two agree on which name refers to which source even when a query contains
+several joins or set operations.
 """
 function register_query_sources(con, query_tree::QueryableBackend.Queryable)
     source = QueryableBackend.get_source(query_tree)
@@ -49,11 +53,11 @@ function register_query_sources(con, query_tree::QueryableBackend.Queryable)
         register_source_data(con, source.original_source, "source_tbl")
     end
 
-    for node in QueryableBackend.walk_tree(query_tree)
-        if node isa QueryableBackend.QueryableJoin
+    for (i, node) in enumerate(QueryableBackend.walk_tree(query_tree))
+        if node isa QueryableBackend.QueryableBinary
             inner_source = node.inner
             if inner_source isa DuckDBQueryableSource && inner_source.source_type == :table
-                register_source_data(con, inner_source.original_source, "source_tbl_2")
+                register_source_data(con, inner_source.original_source, inner_table_name(i))
             end
         end
     end

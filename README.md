@@ -111,6 +111,23 @@ Physical Plan:
 | `@unique(_.col)`, `@unique({_.a, _.b})` | `SELECT DISTINCT ON (...)` |
 | `@groupby` | `GROUP BY`; use aggregations and `key(_)` in the following `@map` |
 | `@join` | `INNER JOIN` |
+| `@left_join`, `@right_join`, `@full_join` | `LEFT`/`RIGHT`/`FULL OUTER JOIN` |
+| `@concat`, `@union`, `@except`, `@intersect` | `UNION ALL`, `UNION`, `EXCEPT`, `INTERSECT` |
+| `@union_by`, `@except_by`, `@intersect_by` | `DISTINCT ON` with `IN`/`NOT IN` |
+| `@order`, `@order_descending` | `ORDER BY ALL` |
+| `@shuffle()` | `ORDER BY random()` |
+| `@take_last`, `@drop_last` | `QUALIFY ROW_NUMBER() OVER ()` against `COUNT(*) OVER ()` |
+| `@count_by` | `GROUP BY` with `COUNT(*)` |
+| `@count`, `@any`, `@all` | `COUNT(*)`, `EXISTS`, `NOT EXISTS` |
+| `@first`, `@element_at` | `LIMIT`, `LIMIT ... OFFSET` |
+| `@min_by`, `@max_by` | `ORDER BY ... LIMIT 1` |
+
+The second operand of a join or set operation must be a DuckDB source too, so
+write `df1 |> @duckdb() |> @union(df2 |> @duckdb())`.
+
+Terminal operators that are not in the table above — `@last`, `@single`,
+`@contains`, `@aggregate`, `@sequence_equal` — still work: they materialize the
+query and run the in-memory implementation.
 
 Common Julia functions are translated to their SQL equivalents
 (`uppercase`, `lowercase`, `strip`, `replace`, `startswith`, `occursin`,
@@ -120,14 +137,25 @@ the aggregations `sum`, `mean`, `minimum`, `maximum`, `length` and
 
 ## Known limitations
 
-- `@groupjoin` and `@mapmany` are not supported and throw a
-  `TranslationError`.
+- Operators with no SQL equivalent throw a `TranslationError` naming the
+  operator and suggesting a way forward, usually materializing the query
+  first: `@groupjoin`, `@mapmany`, `@chunk`, `@aggregate_by`, `@take_while`,
+  `@drop_while`, `@reverse`, `@index`, `@append`, `@prepend`, `@zip`,
+  `@of_type`, `@cast`, `@summarize`, `@pivot_longer` and `@pivot_wider`.
+- Set operations return rows in whatever order DuckDB produces, while the
+  in-memory implementation preserves first-seen order.
+- `@shuffle` accepts no `rng` argument here, because the shuffling is done by
+  DuckDB's own random number generator.
 - A `@groupby` must be followed by a `@map` with aggregations; the group
   elements cannot be materialized as arrays. Three-argument `@groupby`
   requires a plain column key.
 - `@unique` with a key selector maps to DuckDB's `DISTINCT ON`, which keeps
   an arbitrary row per key unless the input is ordered — Query.jl's
   in-memory implementation keeps the first occurrence.
+- 32-bit platforms are not supported. The x86 `libduckdb` crashes with an
+  access violation inside `duckdb_column_name`, and DuckDB.jl only defines
+  `get_parameter(::BindInfo, ::Int64)`, which stops matching once `Int` is
+  `Int32`. CI therefore does not build the x86 legs.
 - Excel push-down is disabled on Windows: loading DuckDB's `excel`
   extension crashes with the mingw libduckdb build that DuckDB_jll ships
   there. Excel files fall back to Julia-side reading (see
