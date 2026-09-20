@@ -152,6 +152,10 @@ the aggregations `sum`, `mean`, `minimum`, `maximum`, `length` and
 - `@unique` with a key selector maps to DuckDB's `DISTINCT ON`, which keeps
   an arbitrary row per key unless the input is ordered — Query.jl's
   in-memory implementation keeps the first occurrence.
+- 32-bit platforms are not supported. The x86 `libduckdb` crashes with an
+  access violation inside `duckdb_column_name`, and DuckDB.jl only defines
+  `get_parameter(::BindInfo, ::Int64)`, which stops matching once `Int` is
+  `Int32`. CI therefore does not build the x86 legs.
 - Excel push-down is disabled on Windows: loading DuckDB's `excel`
   extension crashes with the mingw libduckdb build that DuckDB_jll ships
   there. Excel files fall back to Julia-side reading (see

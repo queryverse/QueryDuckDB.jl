@@ -38,6 +38,9 @@ FeatherFiles = "0.8, 1"
 IteratorInterfaceExtensions = "1"
 ParquetFiles = "0.2, 1"
 QueryableBackend = "1.1"
+# Test-only, but the tests drive the backend through Query's macros, so an
+# older Query fails with UndefVarError rather than a resolution error.
+Query = "1.2"
 TableTraits = "1"
 Tables = "1"
 julia = "1.12"
@@ -48,9 +51,10 @@ DataFrames = "a93c6f00-e57d-5684-b7b6-d8193f3e46c0"
 # a sources entry to be listed in deps or extras; remove together with the pin.
 ExcelFiles = "89b67f3b-d1aa-5f6f-9ca4-282e8d98620d"
 Query = "1a8c2f83-1ff3-5112-b086-8aa67b057ba1"
+Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
 Statistics = "10745b16-79ce-11e8-11f9-7d13ad32a3b2"
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
 TestItemRunner = "f8b46487-2199-4994-9208-9a1283c18c0a"
 
 [targets]
-test = ["Test", "Query", "DataFrames", "Statistics", "TestItemRunner", "CSVFiles", "ExcelFiles", "FeatherFiles", "ParquetFiles"]
+test = ["Test", "Query", "DataFrames", "Statistics", "TestItemRunner", "CSVFiles", "ExcelFiles", "FeatherFiles", "ParquetFiles", "Random"]

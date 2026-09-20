@@ -12,6 +12,12 @@ jobs:
     with:
       include-all-compatible-minor-versions: true
       include-rc-versions: true
+      # DuckDB has no working 32-bit support: the x86 libduckdb crashes with an
+      # access violation inside duckdb_column_name, and DuckDB.jl only defines
+      # get_parameter(::BindInfo, ::Int64), which no longer matches when Int is
+      # Int32. Every test errored on those legs, on main as well as here.
+      include-windows-x86: false
+      include-linux-x86: false
     permissions: write-all
     secrets:
       codecov_token: ${{ secrets.CODECOV_TOKEN }}
