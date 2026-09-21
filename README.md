@@ -1,6 +1,6 @@
 # QueryDuckDB
 
-[![Project Status: WIP – Initial development is in progress, but there has not yet been a stable, usable release suitable for the public.](https://www.repostatus.org/badges/latest/wip.svg)](https://www.repostatus.org/#wip)
+[![Project Status: Active – The project has reached a stable, usable state and is being actively developed.](https://www.repostatus.org/badges/latest/active.svg)](https://www.repostatus.org/#active)
 [![Build Status](https://github.com/queryverse/QueryDuckDB.jl/actions/workflows/juliaci.yml/badge.svg?branch=main)](https://github.com/queryverse/QueryDuckDB.jl/actions/workflows/juliaci.yml)
 [![codecov](https://codecov.io/gh/queryverse/QueryDuckDB.jl/branch/main/graph/badge.svg)](https://codecov.io/gh/queryverse/QueryDuckDB.jl)
 
