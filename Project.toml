@@ -32,7 +32,7 @@ ExcelFiles = {url = "https://github.com/queryverse/ExcelFiles.jl", rev = "main"}
 CSVFiles = "1.0.2"
 DBInterface = "2"
 DataValues = "0.4.4, 0.5, 1"
-DuckDB = "1"
+DuckDB = "1, 2.0"
 ExcelFiles = "1"
 FeatherFiles = "0.8, 1"
 IteratorInterfaceExtensions = "1"
